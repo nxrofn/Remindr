@@ -22,6 +22,14 @@ def _conn():
         con.close()
 
 
+def _migrate_db(con: sqlite3.Connection) -> None:
+    existing = {row[1] for row in con.execute("PRAGMA table_info(reminders)")}
+    if "recur" not in existing:
+        con.execute("ALTER TABLE reminders ADD COLUMN recur TEXT")
+    if "targets" not in existing:
+        con.execute("ALTER TABLE reminders ADD COLUMN targets TEXT")
+
+
 def init_db() -> None:
     with _conn() as con:
         con.executescript("""
@@ -34,9 +42,7 @@ def init_db() -> None:
                 due_at        TEXT    NOT NULL,
                 created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
                 snooze_count  INTEGER NOT NULL DEFAULT 0,
-                -- recurrence: NULL = one-shot, otherwise an interval string like '1d', '1h', etc.
                 recur         TEXT,
-                -- comma-separated list of extra mention targets, e.g. "role:123456,user:789"
                 targets       TEXT
             );
 
@@ -48,15 +54,13 @@ def init_db() -> None:
                 fallback_channel INTEGER
             );
 
-            -- per-user timezone preference, stored as an IANA name e.g. "America/New_York"
             CREATE TABLE IF NOT EXISTS user_tz (
                 user_id  INTEGER PRIMARY KEY,
                 timezone TEXT NOT NULL
             );
         """)
+        _migrate_db(con)
 
-
-# ── reminders ────────────────────────────────────────────────────────────────
 
 def add_reminder(
     *,
@@ -124,7 +128,6 @@ def snooze_reminder(reminder_id: int, user_id: int, new_due: datetime) -> bool:
 
 
 def reschedule_recurring(reminder_id: int, new_due: datetime) -> bool:
-    """Bump the due_at of a recurring reminder to its next occurrence."""
     with _conn() as con:
         cur = con.execute(
             "UPDATE reminders SET due_at = ? WHERE id = ?",
@@ -138,8 +141,6 @@ def clear_user_reminders(user_id: int) -> int:
         cur = con.execute("DELETE FROM reminders WHERE user_id = ?", (user_id,))
         return cur.rowcount
 
-
-# ── guild config ──────────────────────────────────────────────────────────────
 
 def set_fallback_channel(guild_id: int, channel_id: int) -> None:
     with _conn() as con:
@@ -159,8 +160,6 @@ def get_fallback_channel(guild_id: int) -> int | None:
         ).fetchone()
         return row["fallback_channel"] if row else None
 
-
-# ── user timezones ────────────────────────────────────────────────────────────
 
 def set_user_timezone(user_id: int, tz: str) -> None:
     with _conn() as con:

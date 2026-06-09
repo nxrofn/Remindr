@@ -7,13 +7,13 @@ log = logging.getLogger(__name__)
 
 
 class ReminderBotError(Exception):
-    """Base class for all ReminderBot errors."""
+    pass
 
 
 class ReminderNotFound(ReminderBotError):
     def __init__(self, reminder_id: int) -> None:
         self.reminder_id = reminder_id
-        super().__init__(f"Reminder #{reminder_id} not found.")
+        super().__init__(f"Reminder {reminder_id} not found.")
 
 
 class ReminderLimitReached(ReminderBotError):
@@ -35,25 +35,23 @@ class InvalidTimezone(ReminderBotError):
 
 
 class DatabaseError(ReminderBotError):
-    """Raised when a database operation fails unexpectedly."""
+    pass
 
 
 class DeliveryError(ReminderBotError):
     def __init__(self, reminder_id: int, user_id: int) -> None:
         self.reminder_id = reminder_id
         self.user_id = user_id
-        super().__init__(
-            f"Could not deliver reminder #{reminder_id} to user {user_id}."
-        )
+        super().__init__(f"Could not deliver reminder {reminder_id} to user {user_id}.")
 
 
 _USER_MESSAGES: dict[type, str] = {
-    ReminderNotFound:    "That reminder doesn't exist or doesn't belong to you.",
-    ReminderLimitReached:"You've hit the reminder limit. Delete a few with `/delete` first.",
-    InvalidDuration:     "Invalid time format — use `<n>m`, `<n>h`, or `<n>d` (e.g. `30m`, `2h`, `1d`).",
-    InvalidTimezone:     "That timezone wasn't recognized. Use an IANA name like `America/New_York` or `Europe/London`.",
-    DatabaseError:       "Something went wrong on our end. Please try again in a moment.",
-    DeliveryError:       "Your reminder fired but couldn't be delivered anywhere.",
+    ReminderNotFound:     "That reminder doesn't exist or doesn't belong to you.",
+    ReminderLimitReached: "You've hit the reminder limit. Delete a few with `/delete` first.",
+    InvalidDuration:      "Invalid time format — use `<n>m`, `<n>h`, or `<n>d` (e.g. `30m`, `2h`, `1d`).",
+    InvalidTimezone:      "That timezone wasn't recognized. Use an IANA name like `America/New_York` or `Europe/London`.",
+    DatabaseError:        "Something went wrong on our end. Please try again in a moment.",
+    DeliveryError:        "Your reminder fired but couldn't be delivered anywhere.",
 }
 
 
