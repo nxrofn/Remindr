@@ -9,6 +9,7 @@ from discord.ext import tasks
 from dotenv import load_dotenv
 
 import database
+import errors
 
 load_dotenv()
 log = logging.getLogger(__name__)
@@ -99,6 +100,7 @@ class ReminderBot(discord.Client):
 
     async def setup_hook(self) -> None:
         database.init_db()
+        errors.register(self.tree)
         self._register_commands()
         await self.tree.sync()
         self._check_reminders.start()
