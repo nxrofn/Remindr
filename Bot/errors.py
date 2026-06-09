@@ -11,27 +11,27 @@ class ReminderBotError(Exception):
 
 
 class ReminderNotFound(ReminderBotError):
-    """Raised when a reminder ID doesn't exist or doesn't belong to the user."""
-
     def __init__(self, reminder_id: int) -> None:
         self.reminder_id = reminder_id
         super().__init__(f"Reminder #{reminder_id} not found.")
 
 
 class ReminderLimitReached(ReminderBotError):
-    """Raised when a user tries to create more reminders than the allowed limit."""
-
     def __init__(self, limit: int) -> None:
         self.limit = limit
         super().__init__(f"Reminder limit of {limit} reached.")
 
 
 class InvalidDuration(ReminderBotError):
-    """Raised when a duration string can't be parsed."""
-
     def __init__(self, value: str) -> None:
         self.value = value
         super().__init__(f"Invalid duration: {value!r}")
+
+
+class InvalidTimezone(ReminderBotError):
+    def __init__(self, value: str) -> None:
+        self.value = value
+        super().__init__(f"Unknown timezone: {value!r}")
 
 
 class DatabaseError(ReminderBotError):
@@ -39,8 +39,6 @@ class DatabaseError(ReminderBotError):
 
 
 class DeliveryError(ReminderBotError):
-    """Raised when a reminder can't be delivered to the user or any fallback channel."""
-
     def __init__(self, reminder_id: int, user_id: int) -> None:
         self.reminder_id = reminder_id
         self.user_id = user_id
@@ -50,11 +48,12 @@ class DeliveryError(ReminderBotError):
 
 
 _USER_MESSAGES: dict[type, str] = {
-    ReminderNotFound: "That reminder doesn't exist or doesn't belong to you.",
-    ReminderLimitReached: "You've hit the reminder limit. Delete a few with `/delete` first.",
-    InvalidDuration: "Invalid time format — use `<n>m`, `<n>h`, or `<n>d` (e.g. `30m`, `2h`, `1d`).",
-    DatabaseError: "Something went wrong on our end. Please try again in a moment.",
-    DeliveryError: "Your reminder fired but couldn't be delivered anywhere.",
+    ReminderNotFound:    "That reminder doesn't exist or doesn't belong to you.",
+    ReminderLimitReached:"You've hit the reminder limit. Delete a few with `/delete` first.",
+    InvalidDuration:     "Invalid time format — use `<n>m`, `<n>h`, or `<n>d` (e.g. `30m`, `2h`, `1d`).",
+    InvalidTimezone:     "That timezone wasn't recognized. Use an IANA name like `America/New_York` or `Europe/London`.",
+    DatabaseError:       "Something went wrong on our end. Please try again in a moment.",
+    DeliveryError:       "Your reminder fired but couldn't be delivered anywhere.",
 }
 
 

@@ -8,18 +8,26 @@ from discord import app_commands
 from discord.ext import tasks
 from dotenv import load_dotenv
 
+try:
+    import zoneinfo
+except ImportError:
+    from backports import zoneinfo  # Python 3.8 fallback
+
 import database
 import errors
 
 load_dotenv()
 log = logging.getLogger(__name__)
 
+# e.g. "30m", "2h", "1d"
 DURATION_RE = re.compile(r"^(\d+)\s*([mhd])$", re.IGNORECASE)
 UNITS = {"m": "minutes", "h": "hours", "d": "days"}
 
 MAX_REMINDERS_PER_USER = 25
 SNOOZE_OPTIONS = [("5 min", "5m"), ("15 min", "15m"), ("1 hour", "1h"), ("Tomorrow", "1d")]
 
+
+# ── helpers ───────────────────────────────────────────────────────────────────
 
 def parse_duration(value: str) -> timedelta | None:
     m = DURATION_RE.match(value.strip())
@@ -33,6 +41,30 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def resolve_tz(user_id: int) -> timezone | zoneinfo.ZoneInfo:
+    name = database.get_user_timezone(user_id)
+    if name:
+        try:
+            return zoneinfo.ZoneInfo(name)
+        except Exception:
+            pass
+    return timezone.utc
+
+
+def build_target_mentions(targets_str: str | None) -> str:
+    """Turn a stored targets string into Discord mention text."""
+    if not targets_str:
+        return ""
+    parts = []
+    for entry in targets_str.split(","):
+        entry = entry.strip()
+        if entry.startswith("role:"):
+            parts.append(f"<@&{entry[5:]}>")
+        elif entry.startswith("user:"):
+            parts.append(f"<@{entry[5:]}>")
+    return " ".join(parts)
+
+
 def reminder_embed(rows: list, title: str = "Your Reminders") -> discord.Embed:
     embed = discord.Embed(title=title, color=0x5865F2)
     for r in rows:
@@ -41,10 +73,17 @@ def reminder_embed(rows: list, title: str = "Your Reminders") -> discord.Embed:
         label = f"#{r['id']} — {ts}"
         if r["snooze_count"]:
             label += f" *(snoozed {r['snooze_count']}×)*"
-        embed.add_field(name=label, value=r["message"], inline=False)
+        if r["recur"]:
+            label += f" 🔁 every {r['recur']}"
+        body = r["message"]
+        if r["targets"]:
+            body += f"\n*Also notifying: {build_target_mentions(r['targets'])}*"
+        embed.add_field(name=label, value=body, inline=False)
     embed.set_footer(text=f"{len(rows)} active reminder{'s' if len(rows) != 1 else ''}")
     return embed
 
+
+# ── snooze UI ─────────────────────────────────────────────────────────────────
 
 class SnoozeView(discord.ui.View):
     def __init__(self, reminder_id: int, user_id: int) -> None:
@@ -80,7 +119,6 @@ class SnoozeView(discord.ui.View):
                     ephemeral=True,
                 )
             self.stop()
-
         return callback
 
     async def _dismiss(self, interaction: discord.Interaction) -> None:
@@ -91,6 +129,8 @@ class SnoozeView(discord.ui.View):
         await interaction.response.edit_message(content="✅ Reminder dismissed.", view=None)
         self.stop()
 
+
+# ── bot ───────────────────────────────────────────────────────────────────────
 
 class ReminderBot(discord.Client):
     def __init__(self) -> None:
@@ -114,6 +154,8 @@ class ReminderBot(discord.Client):
 
     def _register_commands(self) -> None:
 
+        # ── /setup ────────────────────────────────────────────────────────────
+
         @self.tree.command(description="Configure the bot for this server (admin only)")
         @app_commands.describe(fallback_channel="Channel used when a reminder DM can't be sent")
         @app_commands.default_permissions(administrator=True)
@@ -128,16 +170,55 @@ class ReminderBot(discord.Client):
                 ephemeral=True,
             )
 
+        # ── /timezone ─────────────────────────────────────────────────────────
+
+        @self.tree.command(description="Set your timezone for accurate reminder times")
+        @app_commands.describe(tz="IANA timezone name, e.g. America/New_York or Europe/London")
+        async def timezone(interaction: discord.Interaction, tz: str) -> None:
+            try:
+                zoneinfo.ZoneInfo(tz)
+            except (zoneinfo.ZoneInfoNotFoundError, KeyError):
+                await interaction.response.send_message(
+                    f"Unknown timezone `{tz}`. Use an IANA name like `America/New_York`, "
+                    "`Europe/London`, or `Asia/Tokyo`.",
+                    ephemeral=True,
+                )
+                return
+            database.set_user_timezone(interaction.user.id, tz)
+            await interaction.response.send_message(
+                f"Got it — your timezone is now set to **{tz}**. "
+                "Future reminders will show times in your local zone.",
+                ephemeral=True,
+            )
+
+        # ── /remind ───────────────────────────────────────────────────────────
+
         @self.tree.command(description="Set a reminder (e.g. /remind 10m Take a break)")
         @app_commands.describe(
             when="How long from now: 10m, 2h, 1d",
             message="What to remind you about",
+            repeat="Repeat interval: 1h, 1d, 7d, etc. Leave blank for a one-time reminder.",
+            mention="Extra @user or @role to ping alongside you (optional)",
         )
-        async def remind(interaction: discord.Interaction, when: str, message: str) -> None:
+        async def remind(
+            interaction: discord.Interaction,
+            when: str,
+            message: str,
+            repeat: str | None = None,
+            mention: str | None = None,
+        ) -> None:
             delta = parse_duration(when)
             if not delta:
                 await interaction.response.send_message(
                     "Invalid time — use `<n>m`, `<n>h`, or `<n>d` (e.g. `30m`, `2h`, `1d`).",
+                    ephemeral=True,
+                )
+                return
+
+            # validate recurrence string if provided
+            if repeat and not parse_duration(repeat):
+                await interaction.response.send_message(
+                    "Invalid repeat interval — same format as `when` (e.g. `1d`, `12h`).",
                     ephemeral=True,
                 )
                 return
@@ -151,6 +232,15 @@ class ReminderBot(discord.Client):
                 )
                 return
 
+            # parse extra targets from the mention string
+            targets: list[str] = []
+            if mention:
+                # discord.py gives us a raw string; pull out role and user IDs
+                for role_id in re.findall(r"<@&(\d+)>", mention):
+                    targets.append(f"role:{role_id}")
+                for user_id_str in re.findall(r"<@!?(\d+)>", mention):
+                    targets.append(f"user:{user_id_str}")
+
             due_at = utcnow() + delta
             reminder_id = database.add_reminder(
                 user_id=interaction.user.id,
@@ -158,14 +248,90 @@ class ReminderBot(discord.Client):
                 channel_id=interaction.channel_id,
                 message=message,
                 due_at=due_at,
+                recur=repeat,
+                targets=targets or None,
             )
+
             ts = discord.utils.format_dt(due_at, style="R")
-            embed = discord.Embed(
-                description=f"⏰ I'll ping you {ts}.\n\n> {message}",
-                color=0x57F287,
+            desc = f"⏰ I'll ping you {ts}.\n\n> {message}"
+            if repeat:
+                desc += f"\n\n🔁 Repeats every **{repeat}**"
+            if targets:
+                mentions_preview = build_target_mentions(",".join(targets))
+                desc += f"\n👥 Also notifying: {mentions_preview}"
+
+            embed = discord.Embed(description=desc, color=0x57F287)
+            embed.set_footer(
+                text=f"Reminder #{reminder_id} • cancel anytime with /delete {reminder_id}"
             )
-            embed.set_footer(text=f"Reminder #{reminder_id} • delete it anytime with /delete {reminder_id}")
             await interaction.response.send_message(embed=embed)
+
+        # ── /remindgroup ──────────────────────────────────────────────────────
+
+        @self.tree.command(
+            name="remindgroup",
+            description="Remind a role or set of users in a channel",
+        )
+        @app_commands.describe(
+            when="How long from now: 10m, 2h, 1d",
+            message="What to remind everyone about",
+            role="Role to ping (optional)",
+            extra_user="An additional user to mention (optional)",
+        )
+        @app_commands.guild_only()
+        async def remindgroup(
+            interaction: discord.Interaction,
+            when: str,
+            message: str,
+            role: discord.Role | None = None,
+            extra_user: discord.Member | None = None,
+        ) -> None:
+            delta = parse_duration(when)
+            if not delta:
+                await interaction.response.send_message(
+                    "Invalid time — use `<n>m`, `<n>h`, or `<n>d`.",
+                    ephemeral=True,
+                )
+                return
+
+            existing = database.get_user_reminders(interaction.user.id)
+            if len(existing) >= MAX_REMINDERS_PER_USER:
+                await interaction.response.send_message(
+                    f"You're at the limit of {MAX_REMINDERS_PER_USER} reminders.",
+                    ephemeral=True,
+                )
+                return
+
+            targets: list[str] = []
+            if role:
+                targets.append(f"role:{role.id}")
+            if extra_user:
+                targets.append(f"user:{extra_user.id}")
+
+            due_at = utcnow() + delta
+            reminder_id = database.add_reminder(
+                user_id=interaction.user.id,
+                guild_id=interaction.guild_id,
+                channel_id=interaction.channel_id,
+                message=message,
+                due_at=due_at,
+                targets=targets or None,
+            )
+
+            ts = discord.utils.format_dt(due_at, style="R")
+            mentions_preview = build_target_mentions(",".join(targets)) if targets else "no extra mentions"
+            embed = discord.Embed(
+                description=(
+                    f"⏰ Group reminder set for {ts}.\n\n"
+                    f"> {message}\n\n"
+                    f"👥 Will ping: you + {mentions_preview}"
+                ),
+                color=0x5865F2,
+            )
+            embed.set_footer(text=f"Reminder #{reminder_id}")
+            await interaction.response.send_message(embed=embed)
+
+        # ── /reminders ────────────────────────────────────────────────────────
 
         @self.tree.command(description="List your active reminders")
         async def reminders(interaction: discord.Interaction) -> None:
@@ -178,6 +344,8 @@ class ReminderBot(discord.Client):
                 ephemeral=True,
             )
 
+        # ── /delete ───────────────────────────────────────────────────────────
+
         @self.tree.command(description="Delete a reminder by ID")
         @app_commands.describe(id="Reminder ID shown in /reminders")
         async def delete(interaction: discord.Interaction, id: int) -> None:
@@ -188,6 +356,8 @@ class ReminderBot(discord.Client):
                     f"No reminder #{id} found (or it's not yours).",
                     ephemeral=True,
                 )
+
+        # ── /clear ────────────────────────────────────────────────────────────
 
         @self.tree.command(name="clear", description="Delete ALL of your reminders at once")
         async def clear(interaction: discord.Interaction) -> None:
@@ -200,10 +370,19 @@ class ReminderBot(discord.Client):
             else:
                 await interaction.response.send_message("No active reminders to clear.", ephemeral=True)
 
+    # ── reminder delivery loop ────────────────────────────────────────────────
+
     @tasks.loop(seconds=30)
     async def _check_reminders(self) -> None:
         for row in database.get_due_reminders(utcnow()):
             await self._deliver(row)
+            if row["recur"]:
+                # bump to next occurrence instead of deleting
+                delta = parse_duration(row["recur"])
+                if delta:
+                    new_due = datetime.fromisoformat(row["due_at"]).replace(tzinfo=timezone.utc) + delta
+                    database.reschedule_recurring(row["id"], new_due)
+                    continue
             database.delete_reminder(row["id"], row["user_id"])
 
     @_check_reminders.before_loop
@@ -215,9 +394,18 @@ class ReminderBot(discord.Client):
         log.exception("Error in reminder loop: %s", error)
 
     async def _deliver(self, row: dict) -> None:
-        content = f"⏰ **Reminder:** {row['message']}"
+        # build the message — always @mention the owner plus any extra targets
+        owner_mention = f"<@{row['user_id']}>"
+        extra_mentions = build_target_mentions(row["targets"])
+        all_mentions = f"{owner_mention} {extra_mentions}".strip()
+
+        content = f"⏰ {all_mentions} **Reminder:** {row['message']}"
+        if row["recur"]:
+            content += f"\n*(repeats every {row['recur']})*"
+
         view = SnoozeView(row["id"], row["user_id"])
 
+        # try DM first
         user = self.get_user(row["user_id"]) or await self.fetch_user(row["user_id"])
         try:
             await user.send(content, view=view)
@@ -225,10 +413,10 @@ class ReminderBot(discord.Client):
         except (discord.Forbidden, discord.HTTPException):
             pass
 
-        # Fall back to the channel the reminder was created in.
+        # fall back to the channel the reminder was set in
         channel = self.get_channel(row["channel_id"])
 
-        # Prefer the guild-configured fallback channel if available.
+        # prefer the guild-configured fallback channel if available
         if guild_id := row["guild_id"]:
             if guild := self.get_guild(guild_id):
                 fallback_id = database.get_fallback_channel(guild.id)
@@ -237,13 +425,15 @@ class ReminderBot(discord.Client):
 
         if channel:
             try:
-                await channel.send(f"<@{row['user_id']}> {content}", view=view)
+                await channel.send(content, view=view)
                 return
             except (discord.Forbidden, discord.HTTPException):
                 pass
 
         log.warning("Could not deliver reminder %d to user %d", row["id"], row["user_id"])
 
+
+# ── entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
     logging.basicConfig(
