@@ -1,7 +1,7 @@
 import logging
 import os
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone as dt_timezone
 
 import discord
 from discord import app_commands
@@ -35,18 +35,17 @@ def parse_duration(value: str) -> timedelta | None:
 
 
 def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(dt_timezone.utc)
 
 
-def resolve_tz(user_id: int) -> timezone | zoneinfo.ZoneInfo:
+def resolve_tz(user_id: int) -> dt_timezone | zoneinfo.ZoneInfo:
     name = database.get_user_timezone(user_id)
     if name:
         try:
             return zoneinfo.ZoneInfo(name)
         except Exception:
             pass
-    return timezone.utc
-
+    return dt_timezone.utc
 
 def build_target_mentions(targets_str: str | None) -> str:
     if not targets_str:
@@ -64,8 +63,8 @@ def build_target_mentions(targets_str: str | None) -> str:
 def reminder_embed(rows: list, title: str = "Your Reminders") -> discord.Embed:
     embed = discord.Embed(title=title, color=0x5865F2)
     for r in rows:
-        due = datetime.fromisoformat(r["due_at"])
-        ts = discord.utils.format_dt(due, style="R")
+        due = datetime.fromisoformat(r["due_at"]).replace(tzinfo=dt_timezone.utc)
+        ts = "⚠️ overdue" if due <= utcnow() else discord.utils.format_dt(due, style="R")
         label = f"{r['id']} — {ts}"
         if r["snooze_count"]:
             label += f" *(snoozed {r['snooze_count']}×)*"
@@ -102,7 +101,7 @@ class SnoozeView(discord.ui.View):
             delta = parse_duration(code)
             new_due = utcnow() + delta
             if database.snooze_reminder(self.reminder_id, self.user_id, new_due):
-                ts = discord.utils.format_dt(new_due, style="R")
+                ts = discord.utils.format_dt(new_due.astimezone(dt_timezone.utc), style="R")
                 await interaction.response.edit_message(
                     content=f"⏰ Snoozed! I'll remind you again {ts}.",
                     view=None,
@@ -134,10 +133,10 @@ class ReminderBot(discord.Client):
         database.init_db()
         errors.register(self.tree)
         self._register_commands()
-        await self.tree.sync()
         self._check_reminders.start()
 
     async def on_ready(self) -> None:
+        await self.tree.sync()
         log.info("Logged in as %s (id=%d)", self.user, self.user.id)
         await self.change_presence(activity=discord.Activity(
             type=discord.ActivityType.watching,
@@ -235,7 +234,7 @@ class ReminderBot(discord.Client):
                 targets=targets or None,
             )
 
-            ts = discord.utils.format_dt(due_at, style="R")
+            ts = discord.utils.format_dt(due_at.astimezone(dt_timezone.utc), style="R")
             desc = f"⏰ I'll ping you {ts}.\n\n> {message}"
             if repeat:
                 desc += f"\n\n🔁 Repeats every **{repeat}**"
@@ -245,7 +244,7 @@ class ReminderBot(discord.Client):
 
             embed = discord.Embed(description=desc, color=0x57F287)
             embed.set_footer(text=f"Reminder {reminder_id} • cancel anytime with /delete {reminder_id}")
-            await interaction.response.send_message(embed=embed)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
 
         @self.tree.command(name="remindgroup", description="Remind a role or set of users in a channel")
         @app_commands.describe(
@@ -294,7 +293,7 @@ class ReminderBot(discord.Client):
                 targets=targets or None,
             )
 
-            ts = discord.utils.format_dt(due_at, style="R")
+            ts = discord.utils.format_dt(due_at.astimezone(dt_timezone.utc), style="R")
             mentions_preview = build_target_mentions(",".join(targets)) if targets else "no extra mentions"
             embed = discord.Embed(
                 description=(
@@ -305,7 +304,7 @@ class ReminderBot(discord.Client):
                 color=0x5865F2,
             )
             embed.set_footer(text=f"Reminder {reminder_id}")
-            await interaction.response.send_message(embed=embed)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
 
         @self.tree.command(description="List your active reminders")
         async def reminders(interaction: discord.Interaction) -> None:
@@ -337,17 +336,22 @@ class ReminderBot(discord.Client):
             else:
                 await interaction.response.send_message("No active reminders to clear.", ephemeral=True)
 
-    @tasks.loop(seconds=30)
+    @tasks.loop(seconds=5)
     async def _check_reminders(self) -> None:
-        for row in database.get_due_reminders(utcnow()):
-            await self._deliver(row)
+        due_rows = database.get_due_reminders(utcnow())
+        to_deliver = []
+        for row in due_rows:
             if row["recur"]:
                 delta = parse_duration(row["recur"])
                 if delta:
-                    new_due = datetime.fromisoformat(row["due_at"]).replace(tzinfo=timezone.utc) + delta
+                    new_due = datetime.fromisoformat(row["due_at"]).replace(tzinfo=dt_timezone.utc) + delta
                     database.reschedule_recurring(row["id"], new_due)
-                    continue
-            database.delete_reminder(row["id"], row["user_id"])
+                    to_deliver.append(row)
+            else:
+                if database.delete_reminder(row["id"], row["user_id"]):
+                    to_deliver.append(row)
+        for row in to_deliver:
+            await self._deliver(row)
 
     @_check_reminders.before_loop
     async def _before_check(self) -> None:
@@ -358,39 +362,21 @@ class ReminderBot(discord.Client):
         log.exception("Error in reminder loop: %s", error)
 
     async def _deliver(self, row: dict) -> None:
-        owner_mention = f"<@{row['user_id']}>"
-        extra_mentions = build_target_mentions(row["targets"])
-        all_mentions = f"{owner_mention} {extra_mentions}".strip()
-
-        content = f"⏰ {all_mentions} **Reminder:** {row['message']}"
+        content = f"<@{row['user_id']}> ⏰ **Reminder:** {row['message']}"
         if row["recur"]:
             content += f"\n*(repeats every {row['recur']})*"
 
-        view = SnoozeView(row["id"], row["user_id"])
-
-        user = self.get_user(row["user_id"]) or await self.fetch_user(row["user_id"])
         try:
-            await user.send(content, view=view)
-            return
-        except (discord.Forbidden, discord.HTTPException):
-            pass
-
-        channel = self.get_channel(row["channel_id"])
-
-        if guild_id := row["guild_id"]:
-            if guild := self.get_guild(guild_id):
-                fallback_id = database.get_fallback_channel(guild.id)
-                if fallback_id:
-                    channel = self.get_channel(fallback_id) or channel
-
-        if channel:
-            try:
-                await channel.send(content, view=view)
-                return
-            except (discord.Forbidden, discord.HTTPException):
-                pass
-
-        log.warning("Could not deliver reminder %d to user %d", row["id"], row["user_id"])
+            user = self.get_user(row["user_id"]) or await self.fetch_user(row["user_id"])
+            log.info("Delivering reminder %d to user %d (%s)", row["id"], row["user_id"], user)
+            await user.send(content)
+            log.info("Reminder %d delivered successfully", row["id"])
+        except discord.Forbidden:
+            log.warning("Forbidden — user %d has DMs disabled", row["user_id"])
+        except discord.HTTPException as e:
+            log.warning("HTTPException delivering reminder %d: %s", row["id"], e)
+        except Exception as e:
+            log.exception("Unexpected error delivering reminder %d: %s", row["id"], e)
 
 
 def main() -> None:
