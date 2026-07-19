@@ -126,6 +126,7 @@ class SnoozeView(discord.ui.View):
 class ReminderBot(discord.Client):
     def __init__(self) -> None:
         intents = discord.Intents.default()
+        intents.message_content = True
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
 
@@ -142,6 +143,41 @@ class ReminderBot(discord.Client):
             type=discord.ActivityType.watching,
             name="for /remind",
         ))
+
+    async def on_message(self, message: discord.Message) -> None:
+        if message.author.bot:
+            return
+        if message.content.strip().lower() != ".christmas":
+            return
+
+        tz = resolve_tz(message.author.id)
+        now = utcnow().astimezone(tz)
+        target = now.replace(month=12, day=25, hour=0, minute=0, second=0, microsecond=0)
+        if now.date() > target.date():
+            target = target.replace(year=target.year + 1)
+
+        if now.date() == target.date():
+            embed = discord.Embed(description="🎄 It's Christmas! Merry Christmas!", color=0xC8102E)
+            await message.channel.send(embed=embed)
+            return
+
+        delta = target - now
+        days, rem = divmod(int(delta.total_seconds()), 86400)
+        hours, minutes = divmod(rem // 60, 60)
+
+        parts = []
+        if days:
+            parts.append(f"{days} day{'s' if days != 1 else ''}")
+        if hours:
+            parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
+        parts.append(f"{minutes} minute{'s' if minutes != 1 else ''}")
+        if len(parts) > 1:
+            countdown = ", ".join(parts[:-1]) + f" and {parts[-1]}"
+        else:
+            countdown = parts[0]
+
+        embed = discord.Embed(description=f"🎄 **{countdown}** until Christmas.", color=0xC8102E)
+        await message.channel.send(embed=embed)
 
     def _register_commands(self) -> None:
 
