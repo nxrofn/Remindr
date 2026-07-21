@@ -25,6 +25,11 @@ UNITS = {"m": "minutes", "h": "hours", "d": "days"}
 MAX_REMINDERS_PER_USER = 25
 SNOOZE_OPTIONS = [("5 min", "5m"), ("15 min", "15m"), ("1 hour", "1h"), ("Tomorrow", "1d")]
 
+TEXT_COMMANDS = {
+    ".commands": "Show the list of commands",
+    ".christmas": "Countdown to Christmas",
+}
+
 
 def parse_duration(value: str) -> timedelta | None:
     m = DURATION_RE.match(value.strip())
@@ -75,6 +80,20 @@ def reminder_embed(rows: list, title: str = "Your Reminders") -> discord.Embed:
             body += f"\n*Also notifying: {build_target_mentions(r['targets'])}*"
         embed.add_field(name=label, value=body, inline=False)
     embed.set_footer(text=f"{len(rows)} active reminder{'s' if len(rows) != 1 else ''}")
+    return embed
+
+
+def commands_embed(tree: app_commands.CommandTree) -> discord.Embed:
+    slash_lines = [
+        f"`/{cmd.name}` — {cmd.description}"
+        for cmd in sorted(tree.get_commands(), key=lambda c: c.name)
+    ]
+    text_lines = [f"`{trigger}` — {desc}" for trigger, desc in TEXT_COMMANDS.items()]
+
+    embed = discord.Embed(title="Available Commands", color=0x5865F2)
+    embed.add_field(name="Slash Commands", value="\n".join(slash_lines), inline=False)
+    embed.add_field(name="Text Commands", value="\n".join(text_lines), inline=False)
+    embed.set_footer(text=f"{len(slash_lines)} slash commands, {len(text_lines)} text commands")
     return embed
 
 
@@ -147,7 +166,14 @@ class ReminderBot(discord.Client):
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot:
             return
-        if message.content.strip().lower() != ".christmas":
+
+        content = message.content.strip().lower()
+
+        if content == ".commands":
+            await message.channel.send(embed=commands_embed(self.tree))
+            return
+
+        if content != ".christmas":
             return
 
         tz = resolve_tz(message.author.id)
@@ -176,7 +202,7 @@ class ReminderBot(discord.Client):
         else:
             countdown = parts[0]
 
-        embed = discord.Embed(description=f"🎄 **{countdown}** until Christmas.", color=0xC8102E)
+        embed = discord.Embed(description=f" **{countdown}** until Christmas!🎄", color=0xC8102E)
         await message.channel.send(embed=embed)
 
     def _register_commands(self) -> None:
