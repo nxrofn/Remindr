@@ -19,6 +19,11 @@ import errors
 load_dotenv()
 log = logging.getLogger(__name__)
 
+BOT_OWNER_ID: int | None = None
+_raw_owner = os.environ.get("BOT_OWNER_ID", "").strip()
+if _raw_owner.isdigit():
+    BOT_OWNER_ID = int(_raw_owner)
+
 DURATION_RE = re.compile(r"^(\d+)\s*([mhd])$", re.IGNORECASE)
 UNITS = {"m": "minutes", "h": "hours", "d": "days"}
 
@@ -28,6 +33,7 @@ SNOOZE_OPTIONS = [("5 min", "5m"), ("15 min", "15m"), ("1 hour", "1h"), ("Tomorr
 TEXT_COMMANDS = {
     ".commands": "Show the list of commands",
     ".christmas": "Countdown to Christmas",
+    ".shutdown": "Shut down the bot (owner only)",
 }
 
 
@@ -171,6 +177,15 @@ class ReminderBot(discord.Client):
 
         if content == ".commands":
             await message.channel.send(embed=commands_embed(self.tree))
+            return
+
+        if content == ".shutdown":
+            if BOT_OWNER_ID is None or message.author.id != BOT_OWNER_ID:
+                return  # silently ignore — don't reveal the command exists
+            log.info("Shutdown requested by owner (user_id=%d)", message.author.id)
+            await message.channel.send("✅ Shutting down. Goodbye!")
+            self._check_reminders.cancel()
+            await self.close()
             return
 
         if content != ".christmas":
